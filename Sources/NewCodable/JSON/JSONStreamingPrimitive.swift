@@ -17,8 +17,6 @@ import FoundationEssentials
 import Foundation
 #endif
 
-package import BasicContainers
-
 // MARK: - JSONStreamingPrimitive
 
 /// A lazy, non-escaping representation of a JSON value that parses the document
@@ -58,20 +56,20 @@ struct JSONStreamingPrimitive: ~Escapable {
     @_lifetime(copy bytes)
     @usableFromInline
     static func from(_ bytes: RawSpan) throws(JSONError) -> JSONStreamingPrimitive {
-        let offset = JSONStreamingPrimitive._skipWhitespace(in: bytes, from: 0)
+        let offset = _jsonSkipWhitespace(in: bytes, from: 0)
         guard offset < bytes.byteCount else {
             throw .unexpectedEndOfFile
         }
-        let kind = try JSONStreamingPrimitive._kindOfValue(in: bytes, at: offset)
+        let kind = try _jsonKindOfValue(in: bytes, at: offset)
         switch kind {
         case .bool:
             if bytes._loadByteUnchecked(offset) == UInt8(ascii: "t") {
-                try _validateTrue(in: bytes, at: offset)
+                try _jsonValidateTrue(in: bytes, at: offset)
             } else {
-                try _validateFalse(in: bytes, at: offset)
+                try _jsonValidateFalse(in: bytes, at: offset)
             }
         case .null:
-            try _validateNull(in: bytes, at: offset)
+            try _jsonValidateNull(in: bytes, at: offset)
         default:
             break
         }
@@ -97,7 +95,7 @@ struct JSONStreamingPrimitive: ~Escapable {
             }
             // startOffset points to the opening quote
             let contentStart = startOffset + 1
-            let contentEnd = try JSONStreamingPrimitive._findClosingQuote(
+            let contentEnd = try _jsonFindClosingQuote(
                 in: bytes, from: contentStart
             )
             return bytes.extracting(contentStart ..< contentEnd)
@@ -127,25 +125,7 @@ struct JSONStreamingPrimitive: ~Escapable {
         _ body: (UTF8Span) throws -> T
     ) throws(JSONError) -> T {
         let rawSpan = try rawStringBytes
-        if isSimpleString {
-            // Fast path: no escapes, just validate UTF-8 directly from source.
-            do {
-                let utf8Span = try UTF8Span(validating: Span<UInt8>(_bytes: rawSpan))
-                return try body(utf8Span)
-            } catch {
-                throw .cannotConvertEntireInputDataToUTF8
-            }
-        } else {
-            // Slow path: process escape sequences into temporary buffer.
-            var buffer = UniqueArray<UInt8>()
-            try JSONPrescannedPrimitive._processEscapes(from: rawSpan, into: &buffer)
-            do {
-                let utf8Span = try UTF8Span(validating: buffer.span)
-                return try body(utf8Span)
-            } catch {
-                throw .cannotConvertEntireInputDataToUTF8
-            }
-        }
+        return try _jsonWithUTF8String(rawSpan: rawSpan, isSimple: isSimpleString, body)
     }
 
     /// The raw UTF-8 bytes of a number value.
@@ -160,11 +140,11 @@ struct JSONStreamingPrimitive: ~Escapable {
                     location: .init(byteOffset: startOffset)
                 )
             }
-            let endOffset = JSONStreamingPrimitive._findEndOfNumber(
+            let endOffset = _jsonFindEndOfNumber(
                 in: bytes, from: startOffset
             )
             let span = bytes.extracting(startOffset ..< endOffset)
-            try JSONStreamingPrimitive._validateNumber(span, at: startOffset)
+            try _jsonValidateNumber(span, at: startOffset)
             return span
         }
     }
@@ -177,10 +157,10 @@ struct JSONStreamingPrimitive: ~Escapable {
                 throw .unexpectedEndOfFile
             }
             if bytes._loadByteUnchecked(startOffset) == UInt8(ascii: "t") {
-                try JSONStreamingPrimitive._validateTrue(in: bytes, at: startOffset)
+                try _jsonValidateTrue(in: bytes, at: startOffset)
                 return true
             } else {
-                try JSONStreamingPrimitive._validateFalse(in: bytes, at: startOffset)
+                try _jsonValidateFalse(in: bytes, at: startOffset)
                 return false
             }
         }
@@ -200,7 +180,7 @@ struct JSONStreamingPrimitive: ~Escapable {
         guard _kind == .null else {
             throw .unexpectedEndOfFile
         }
-        try JSONStreamingPrimitive._validateNull(in: bytes, at: startOffset)
+        try _jsonValidateNull(in: bytes, at: startOffset)
     }
 
     // MARK: - Array Iteration
@@ -226,7 +206,7 @@ struct JSONStreamingPrimitive: ~Escapable {
         mutating func next() throws(JSONError) -> JSONStreamingPrimitive? {
             guard !done else { return nil }
 
-            var offset = JSONStreamingPrimitive._skipWhitespace(
+            var offset = _jsonSkipWhitespace(
                 in: bytes, from: currentOffset
             )
             guard offset < bytes.byteCount else {
@@ -239,14 +219,14 @@ struct JSONStreamingPrimitive: ~Escapable {
                 return nil
             }
 
-            let kind = try JSONStreamingPrimitive._kindOfValue(in: bytes, at: offset)
+            let kind = try _jsonKindOfValue(in: bytes, at: offset)
             let element = JSONStreamingPrimitive(
                 bytes: bytes, startOffset: offset, kind: kind
             )
 
             // Skip past this value to find the next element
-            offset = try JSONStreamingPrimitive._skipValue(in: bytes, from: offset)
-            offset = JSONStreamingPrimitive._skipWhitespace(in: bytes, from: offset)
+            offset = try _jsonSkipValue(in: bytes, from: offset)
+            offset = _jsonSkipWhitespace(in: bytes, from: offset)
 
             guard offset < bytes.byteCount else {
                 throw .unexpectedEndOfFile
@@ -305,7 +285,7 @@ struct JSONStreamingPrimitive: ~Escapable {
         )? {
             guard !done else { return nil }
 
-            var offset = JSONStreamingPrimitive._skipWhitespace(
+            var offset = _jsonSkipWhitespace(
                 in: bytes, from: currentOffset
             )
             guard offset < bytes.byteCount else {
@@ -332,8 +312,8 @@ struct JSONStreamingPrimitive: ~Escapable {
             )
 
             // Skip past key
-            offset = try JSONStreamingPrimitive._skipValue(in: bytes, from: offset)
-            offset = JSONStreamingPrimitive._skipWhitespace(in: bytes, from: offset)
+            offset = try _jsonSkipValue(in: bytes, from: offset)
+            offset = _jsonSkipWhitespace(in: bytes, from: offset)
 
             // Expect colon
             guard offset < bytes.byteCount,
@@ -347,19 +327,19 @@ struct JSONStreamingPrimitive: ~Escapable {
             offset += 1
 
             // Value
-            offset = JSONStreamingPrimitive._skipWhitespace(in: bytes, from: offset)
+            offset = _jsonSkipWhitespace(in: bytes, from: offset)
             guard offset < bytes.byteCount else {
                 throw .unexpectedEndOfFile
             }
 
-            let valueKind = try JSONStreamingPrimitive._kindOfValue(in: bytes, at: offset)
+            let valueKind = try _jsonKindOfValue(in: bytes, at: offset)
             let value = JSONStreamingPrimitive(
                 bytes: bytes, startOffset: offset, kind: valueKind
             )
 
             // Skip past value
-            offset = try JSONStreamingPrimitive._skipValue(in: bytes, from: offset)
-            offset = JSONStreamingPrimitive._skipWhitespace(in: bytes, from: offset)
+            offset = try _jsonSkipValue(in: bytes, from: offset)
+            offset = _jsonSkipWhitespace(in: bytes, from: offset)
 
             guard offset < bytes.byteCount else {
                 throw .unexpectedEndOfFile
@@ -407,10 +387,10 @@ struct JSONStreamingPrimitive: ~Escapable {
             if key.isSimpleString {
                 // Fast path: compare raw bytes directly against the key's UTF-8.
                 let rawBytes = try key.rawStringBytes
-                matches = JSONStreamingPrimitive._rawSpanEqualsUTF8(rawBytes, searchKey)
+                matches = _jsonRawSpanEqualsUTF8(rawBytes, searchKey)
             } else {
                 matches = try key.withUTF8String { keyUTF8 in
-                    JSONStreamingPrimitive._rawSpanEqualsUTF8(keyUTF8.span.bytes, searchKey)
+                    _jsonRawSpanEqualsUTF8(keyUTF8.span.bytes, searchKey)
                 }
             }
             if matches {
@@ -462,340 +442,3 @@ struct JSONStreamingPrimitive: ~Escapable {
     }
 }
 
-// MARK: - Internal helpers
-
-extension JSONStreamingPrimitive {
-
-    /// Determines the JSON value kind from the byte at the given offset.
-    @usableFromInline
-    static func _kindOfValue(
-        in bytes: RawSpan, at offset: Int
-    ) throws(JSONError) -> JSONValueKind {
-        let byte = bytes._loadByteUnchecked(offset)
-        switch byte {
-        case ._quote: return .string
-        case ._openbrace: return .object
-        case ._openbracket: return .array
-        case UInt8(ascii: "t"), UInt8(ascii: "f"): return .bool
-        case UInt8(ascii: "n"): return .null
-        case ._minus, _asciiNumbers: return .number
-        default:
-            throw .unexpectedCharacter(
-                ascii: byte,
-                location: .init(byteOffset: offset)
-            )
-        }
-    }
-
-    /// Skips whitespace and returns the offset of the first non-whitespace byte.
-    @usableFromInline
-    static func _skipWhitespace(in bytes: RawSpan, from offset: Int) -> Int {
-        var i = offset
-        while i < bytes.byteCount {
-            switch bytes._loadByteUnchecked(i) {
-            case ._space, ._tab, ._newline, ._return:
-                i &+= 1
-            default:
-                return i
-            }
-        }
-        return i
-    }
-
-    /// Finds the offset of the closing quote for a string starting at
-    /// `contentStart` (the byte after the opening quote).
-    @usableFromInline
-    static func _findClosingQuote(
-        in bytes: RawSpan, from contentStart: Int
-    ) throws(JSONError) -> Int {
-        var i = contentStart
-        while i < bytes.byteCount {
-            let byte = bytes._loadByteUnchecked(i)
-            switch byte {
-            case ._quote:
-                return i
-            case ._backslash:
-                i &+= 2 // skip backslash and escaped character
-            default:
-                i &+= 1
-            }
-        }
-        throw .unexpectedEndOfFile
-    }
-
-    /// Finds the end offset of a number starting at `offset`.
-    @usableFromInline
-    static func _findEndOfNumber(in bytes: RawSpan, from offset: Int) -> Int {
-        var i = offset
-        // Optional leading minus
-        if i < bytes.byteCount && bytes._loadByteUnchecked(i) == ._minus {
-            i &+= 1
-        }
-        while i < bytes.byteCount {
-            let byte = bytes._loadByteUnchecked(i)
-            switch byte {
-            case _asciiNumbers, ._period, ._e, ._E, ._plus, ._minus:
-                // Note: ._plus/._minus here only valid after e/E but we're
-                // doing structural scanning, not validation.
-                i &+= 1
-            default:
-                return i
-            }
-        }
-        return i
-    }
-
-    /// Skips past the JSON value at `offset`, returning the offset just after it.
-    /// This handles nested structures by tracking bracket/brace depth.
-    @usableFromInline
-    static func _skipValue(
-        in bytes: RawSpan, from offset: Int
-    ) throws(JSONError) -> Int {
-        guard offset < bytes.byteCount else {
-            throw .unexpectedEndOfFile
-        }
-        let byte = bytes._loadByteUnchecked(offset)
-        switch byte {
-        case ._quote:
-            // String: skip to closing quote
-            let contentEnd = try _findClosingQuote(in: bytes, from: offset + 1)
-            return contentEnd + 1 // past closing quote
-
-        case ._openbracket:
-            // Array: skip all elements
-            return try _skipCollection(
-                in: bytes, from: offset + 1,
-                closeDelimiter: ._closebracket
-            )
-
-        case ._openbrace:
-            // Object: skip all key-value pairs
-            return try _skipCollection(
-                in: bytes, from: offset + 1,
-                closeDelimiter: ._closebrace
-            )
-
-        case UInt8(ascii: "t"):
-            try _validateTrue(in: bytes, at: offset)
-            return offset + 4
-
-        case UInt8(ascii: "f"):
-            try _validateFalse(in: bytes, at: offset)
-            return offset + 5
-
-        case UInt8(ascii: "n"):
-            try _validateNull(in: bytes, at: offset)
-            return offset + 4
-
-        case ._minus, _asciiNumbers:
-            return _findEndOfNumber(in: bytes, from: offset)
-
-        default:
-            throw .unexpectedCharacter(
-                ascii: byte,
-                location: .init(byteOffset: offset)
-            )
-        }
-    }
-
-    /// Skips a collection (array or object) body, starting after the open
-    /// delimiter, and returns the offset after the close delimiter.
-    @usableFromInline
-    static func _skipCollection(
-        in bytes: RawSpan, from start: Int, closeDelimiter: UInt8
-    ) throws(JSONError) -> Int {
-        var depth = 1
-        var i = start
-        while i < bytes.byteCount && depth > 0 {
-            let byte = bytes._loadByteUnchecked(i)
-            switch byte {
-            case ._openbracket, ._openbrace:
-                depth += 1
-                i &+= 1
-            case ._closebracket, ._closebrace:
-                depth -= 1
-                i &+= 1
-            case ._quote:
-                // Skip string contents (may contain brackets/braces)
-                i &+= 1
-                i = try _findClosingQuote(in: bytes, from: i) + 1
-            default:
-                i &+= 1
-            }
-        }
-        guard depth == 0 else {
-            throw .unexpectedEndOfFile
-        }
-        return i
-    }
-
-    /// Validates that the bytes at `offset` spell out `true`.
-    @usableFromInline
-    static func _validateTrue(
-        in bytes: RawSpan, at offset: Int
-    ) throws(JSONError) {
-        guard offset + 4 <= bytes.byteCount,
-              bytes._loadByteUnchecked(offset) == UInt8(ascii: "t"),
-              bytes._loadByteUnchecked(offset + 1) == UInt8(ascii: "r"),
-              bytes._loadByteUnchecked(offset + 2) == UInt8(ascii: "u"),
-              bytes._loadByteUnchecked(offset + 3) == UInt8(ascii: "e") else {
-            throw .invalidSpecialValue(
-                expected: "true",
-                location: .init(byteOffset: offset)
-            )
-        }
-    }
-
-    /// Validates that the bytes at `offset` spell out `false`.
-    @usableFromInline
-    static func _validateFalse(
-        in bytes: RawSpan, at offset: Int
-    ) throws(JSONError) {
-        guard offset + 5 <= bytes.byteCount,
-              bytes._loadByteUnchecked(offset) == UInt8(ascii: "f"),
-              bytes._loadByteUnchecked(offset + 1) == UInt8(ascii: "a"),
-              bytes._loadByteUnchecked(offset + 2) == UInt8(ascii: "l"),
-              bytes._loadByteUnchecked(offset + 3) == UInt8(ascii: "s"),
-              bytes._loadByteUnchecked(offset + 4) == UInt8(ascii: "e") else {
-            throw .invalidSpecialValue(
-                expected: "false",
-                location: .init(byteOffset: offset)
-            )
-        }
-    }
-
-    /// Validates that the bytes at `offset` spell out `null`.
-    @usableFromInline
-    static func _validateNull(
-        in bytes: RawSpan, at offset: Int
-    ) throws(JSONError) {
-        guard offset + 4 <= bytes.byteCount,
-              bytes._loadByteUnchecked(offset) == UInt8(ascii: "n"),
-              bytes._loadByteUnchecked(offset + 1) == UInt8(ascii: "u"),
-              bytes._loadByteUnchecked(offset + 2) == UInt8(ascii: "l"),
-              bytes._loadByteUnchecked(offset + 3) == UInt8(ascii: "l") else {
-            throw .invalidSpecialValue(
-                expected: "null",
-                location: .init(byteOffset: offset)
-            )
-        }
-    }
-
-    /// Validates that the bytes in `span` form a well-formed JSON number per
-    /// RFC 8259: `[ minus ] int [ frac ] [ exp ]` where
-    /// `int = "0" / digit1-9 *DIGIT`, `frac = "." 1*DIGIT`, `exp = e [+-] 1*DIGIT`.
-    @usableFromInline
-    static func _validateNumber(
-        _ span: RawSpan, at sourceOffset: Int
-    ) throws(JSONError) {
-        var i = 0
-        let count = span.byteCount
-        guard count > 0 else {
-            throw .unexpectedEndOfFile
-        }
-
-        // Optional leading minus
-        if span._loadByteUnchecked(i) == ._minus {
-            i &+= 1
-            guard i < count else {
-                throw .unexpectedCharacter(
-                    context: "in number",
-                    ascii: ._minus,
-                    location: .init(byteOffset: sourceOffset)
-                )
-            }
-        }
-
-        // Integer part
-        let firstDigit = span._loadByteUnchecked(i)
-        guard case _asciiNumbers = firstDigit else {
-            throw .unexpectedCharacter(
-                context: "in number",
-                ascii: firstDigit,
-                location: .init(byteOffset: sourceOffset + i)
-            )
-        }
-        if firstDigit == UInt8(ascii: "0") {
-            i &+= 1
-            // Leading zero must not be followed by another digit.
-            if i < count, case _asciiNumbers = span._loadByteUnchecked(i) {
-                throw .numberWithLeadingZero(
-                    location: .init(byteOffset: sourceOffset)
-                )
-            }
-        } else {
-            // digit1-9 followed by any digits
-            i &+= 1
-            while i < count, case _asciiNumbers = span._loadByteUnchecked(i) {
-                i &+= 1
-            }
-        }
-
-        // Optional fractional part
-        if i < count, span._loadByteUnchecked(i) == ._period {
-            i &+= 1
-            // Must have at least one digit after '.'
-            guard i < count, case _asciiNumbers = span._loadByteUnchecked(i) else {
-                let ascii = i < count ? span._loadByteUnchecked(i) : ._period
-                throw .unexpectedCharacter(
-                    context: "after '.' in number",
-                    ascii: ascii,
-                    location: .init(byteOffset: sourceOffset + i)
-                )
-            }
-            while i < count, case _asciiNumbers = span._loadByteUnchecked(i) {
-                i &+= 1
-            }
-        }
-
-        // Optional exponent part
-        if i < count {
-            let expByte = span._loadByteUnchecked(i)
-            if expByte == ._e || expByte == ._E {
-                i &+= 1
-                // Optional sign
-                if i < count {
-                    let signByte = span._loadByteUnchecked(i)
-                    if signByte == ._plus || signByte == ._minus {
-                        i &+= 1
-                    }
-                }
-                // Must have at least one digit after exponent
-                guard i < count, case _asciiNumbers = span._loadByteUnchecked(i) else {
-                    let ascii = i < count ? span._loadByteUnchecked(i) : expByte
-                    throw .unexpectedCharacter(
-                        context: "after exponent in number",
-                        ascii: ascii,
-                        location: .init(byteOffset: sourceOffset + i)
-                    )
-                }
-                while i < count, case _asciiNumbers = span._loadByteUnchecked(i) {
-                    i &+= 1
-                }
-            }
-        }
-
-        // Must have consumed all bytes
-        guard i == count else {
-            throw .unexpectedCharacter(
-                context: "in number",
-                ascii: span._loadByteUnchecked(i),
-                location: .init(byteOffset: sourceOffset + i)
-            )
-        }
-    }
-
-    /// Compares a `RawSpan` of UTF-8 bytes against a `String` for equality.
-    @usableFromInline
-    static func _rawSpanEqualsUTF8(_ span: RawSpan, _ string: String) -> Bool {
-        var utf8 = string.utf8.makeIterator()
-        guard span.byteCount == string.utf8.count else { return false }
-        for i in 0 ..< span.byteCount {
-            guard let expected = utf8.next(),
-                  span._loadByteUnchecked(i) == expected else {
-                return false
-            }
-        }
-        return true
-    }
-}

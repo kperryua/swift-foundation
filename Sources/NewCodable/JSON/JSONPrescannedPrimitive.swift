@@ -165,25 +165,7 @@ struct JSONPrescannedPrimitive: ~Escapable {
         _ body: (UTF8Span) throws -> T
     ) throws(JSONError) -> T {
         let rawSpan = try rawStringBytes
-        if isSimpleString {
-            // Fast path: no escapes, just validate UTF-8 directly from source.
-            do {
-                let utf8Span = try UTF8Span(validating: Span<UInt8>(_bytes: rawSpan))
-                return try body(utf8Span)
-            } catch {
-                throw .cannotConvertEntireInputDataToUTF8
-            }
-        } else {
-            // Slow path: process escape sequences into temporary buffer.
-            var buffer = UniqueArray<UInt8>()
-            try Self._processEscapes(from: rawSpan, into: &buffer)
-            do {
-                let utf8Span = try UTF8Span(validating: buffer.span)
-                return try body(utf8Span)
-            } catch {
-                throw .cannotConvertEntireInputDataToUTF8
-            }
-        }
+        return try _jsonWithUTF8String(rawSpan: rawSpan, isSimple: isSimpleString, body)
     }
 
     /// The raw UTF-8 bytes of a number value.
@@ -203,7 +185,7 @@ struct JSONPrescannedPrimitive: ~Escapable {
             let count = mapBuffer[mapOffset + 1]
             let offset = mapBuffer[mapOffset + 2]
             let span = bytes.extracting(offset ..< offset + count)
-            try JSONStreamingPrimitive._validateNumber(span, at: offset)
+            try _jsonValidateNumber(span, at: offset)
             return span
         }
     }
@@ -363,10 +345,10 @@ struct JSONPrescannedPrimitive: ~Escapable {
             if key.isSimpleString {
                 // Fast path: compare raw bytes directly against the key's UTF-8.
                 let rawBytes = try key.rawStringBytes
-                matches = JSONPrescannedPrimitive._rawSpanEqualsUTF8(rawBytes, searchKey)
+                matches = _jsonRawSpanEqualsUTF8(rawBytes, searchKey)
             } else {
                 matches = try key.withUTF8String { keyUTF8 in
-                    JSONPrescannedPrimitive._rawSpanEqualsUTF8(keyUTF8.span.bytes, searchKey)
+                    _jsonRawSpanEqualsUTF8(keyUTF8.span.bytes, searchKey)
                 }
             }
             if matches {
@@ -435,163 +417,6 @@ struct JSONPrescannedPrimitive: ~Escapable {
         }
     }
 
-    /// Compares a `RawSpan` of UTF-8 bytes against a `String` for equality.
-    @usableFromInline
-    static func _rawSpanEqualsUTF8(_ span: RawSpan, _ string: String) -> Bool {
-        var utf8 = string.utf8.makeIterator()
-        guard span.byteCount == string.utf8.count else { return false }
-        for i in 0 ..< span.byteCount {
-            guard let expected = utf8.next(),
-                  span._loadByteUnchecked(i) == expected else {
-                return false
-            }
-        }
-        return true
-    }
-}
-
-// MARK: - Escape Processing
-
-extension JSONPrescannedPrimitive {
-
-    /// Processes JSON escape sequences in `rawSpan`, appending the decoded
-    /// UTF-8 bytes into `buffer`.
-    static func _processEscapes(
-        from rawSpan: RawSpan, into buffer: inout UniqueArray<UInt8>
-    ) throws(JSONError) {
-        var i = 0
-        let count = rawSpan.byteCount
-        var chunkStart = 0
-
-        while i < count {
-            let byte = rawSpan._loadByteUnchecked(i)
-            if byte == ._backslash {
-                // Copy the literal chunk before this escape
-                if i > chunkStart {
-                    let chunk = rawSpan.extracting(chunkStart ..< i)
-                    chunk.withUnsafeBytes { ptr in
-                        for j in 0 ..< ptr.count {
-                            buffer.append(ptr.load(fromByteOffset: j, as: UInt8.self))
-                        }
-                    }
-                }
-                i &+= 1
-                guard i < count else { throw .unexpectedEndOfFile }
-                let escaped = rawSpan._loadByteUnchecked(i)
-                switch escaped {
-                case UInt8(ascii: "\""): buffer.append(UInt8(ascii: "\""))
-                case UInt8(ascii: "\\"): buffer.append(UInt8(ascii: "\\"))
-                case UInt8(ascii: "/"): buffer.append(UInt8(ascii: "/"))
-                case UInt8(ascii: "b"): buffer.append(0x08)
-                case UInt8(ascii: "f"): buffer.append(0x0C)
-                case UInt8(ascii: "n"): buffer.append(0x0A)
-                case UInt8(ascii: "r"): buffer.append(0x0D)
-                case UInt8(ascii: "t"): buffer.append(0x09)
-                case UInt8(ascii: "u"):
-                    i &+= 1
-                    try _processUnicodeEscape(from: rawSpan, at: &i, into: &buffer)
-                    chunkStart = i
-                    continue
-                default:
-                    throw .unexpectedEscapedCharacter(
-                        ascii: escaped,
-                        location: .init(byteOffset: i)
-                    )
-                }
-                i &+= 1
-                chunkStart = i
-            } else {
-                i &+= 1
-            }
-        }
-
-        // Copy any remaining literal chunk
-        if chunkStart < count {
-            let chunk = rawSpan.extracting(chunkStart ..< count)
-            chunk.withUnsafeBytes { ptr in
-                for j in 0 ..< ptr.count {
-                    buffer.append(ptr.load(fromByteOffset: j, as: UInt8.self))
-                }
-            }
-        }
-    }
-
-    /// Parses a `\uXXXX` (and optional surrogate pair) escape at the current
-    /// position, appends the resulting UTF-8 bytes, and advances `i` past
-    /// the escape.
-    static func _processUnicodeEscape(
-        from rawSpan: RawSpan, at i: inout Int, into buffer: inout UniqueArray<UInt8>
-    ) throws(JSONError) {
-        guard i + 4 <= rawSpan.byteCount else { throw .unexpectedEndOfFile }
-        let codeUnit = try _parseHex4(from: rawSpan, at: i)
-        i &+= 4
-
-        var scalar: Unicode.Scalar
-        if UTF16.isLeadSurrogate(codeUnit) {
-            // Expect \uXXXX for the low surrogate
-            guard i + 6 <= rawSpan.byteCount,
-                  rawSpan._loadByteUnchecked(i) == ._backslash,
-                  rawSpan._loadByteUnchecked(i + 1) == UInt8(ascii: "u") else {
-                throw .expectedLowSurrogateUTF8SequenceAfterHighSurrogate(
-                    location: .init(byteOffset: i)
-                )
-            }
-            i &+= 2
-            let lowUnit = try _parseHex4(from: rawSpan, at: i)
-            i &+= 4
-            guard UTF16.isTrailSurrogate(lowUnit) else {
-                throw .expectedLowSurrogateUTF8SequenceAfterHighSurrogate(
-                    location: .init(byteOffset: i)
-                )
-            }
-            let encodedScalar = UTF16.EncodedScalar([codeUnit, lowUnit])
-            scalar = UTF16.decode(encodedScalar)
-        } else if UTF16.isTrailSurrogate(codeUnit) {
-            throw .expectedLowSurrogateUTF8SequenceAfterHighSurrogate(
-                location: .init(byteOffset: i)
-            )
-        } else {
-            guard let s = Unicode.Scalar(codeUnit) else {
-                throw .couldNotCreateUnicodeScalarFromUInt32(
-                    location: .init(byteOffset: i), unicodeScalarValue: UInt32(codeUnit)
-                )
-            }
-            scalar = s
-        }
-
-        // Encode the scalar as UTF-8
-        UTF8.encode(scalar) { codeUnit in
-            buffer.append(codeUnit)
-        }
-    }
-
-    /// Parses 4 hex digits from `rawSpan` at position `offset`.
-    @usableFromInline
-    static func _parseHex4(from rawSpan: RawSpan, at offset: Int) throws(JSONError) -> UInt16 {
-        var value: UInt16 = 0
-        for j in 0 ..< 4 {
-            let byte = rawSpan._loadByteUnchecked(offset + j)
-            let nibble: UInt16
-            switch byte {
-            case UInt8(ascii: "0") ... UInt8(ascii: "9"):
-                nibble = UInt16(byte - UInt8(ascii: "0"))
-            case UInt8(ascii: "a") ... UInt8(ascii: "f"):
-                nibble = UInt16(byte - UInt8(ascii: "a") + 10)
-            case UInt8(ascii: "A") ... UInt8(ascii: "F"):
-                nibble = UInt16(byte - UInt8(ascii: "A") + 10)
-            default:
-                let hexString = String(
-                    decoding: (0..<4).map { rawSpan._loadByteUnchecked(offset + $0) },
-                    as: UTF8.self
-                )
-                throw .invalidHexDigitSequence(
-                    hexString, location: .init(byteOffset: offset + j)
-                )
-            }
-            value = (value << 4) | nibble
-        }
-        return value
-    }
 }
 
 // MARK: - Scanner

@@ -690,26 +690,6 @@ extension JSONParserDecoder {
                 return nil
             }
 
-            @usableFromInline
-            @inline(never)
-            @_lifetime(self: copy self)
-            mutating func errorForUnmatchedCharacter(in str: StaticString, typeDescriptor: String) -> JSONError {
-                // Figure out the exact character that is wrong.
-                let badOffset = str.withUTF8Buffer { strBuffer in
-                    let remainingBytes = bytes.extracting(readOffset..<endOffset)
-                    for i in 0..<min(strBuffer.count, remainingBytes.byteCount) {
-                        let strByte = strBuffer[i]
-                        let spanByte = remainingBytes._loadByteUnchecked(i)
-                        if strByte != spanByte {
-                            return i
-                        }
-                    }
-                    return 0 // should be unreachable
-                }
-                self.moveReaderIndex(forwardBy: badOffset)
-                return JSONError.unexpectedCharacter(context: "in expected \(typeDescriptor) value", ascii: self.peek()!, location: sourceLocation)
-            }
-            
             @inlinable
             @inline(__always)
             @_lifetime(self: copy self)
@@ -734,36 +714,17 @@ extension JSONParserDecoder {
 
             @inlinable
             @inline(__always)
-            @_lifetime(self: copy self)
-            mutating func readExpectedString(_ str: StaticString, typeDescriptor: String) throws(JSONError) {
-                do {
-                    let cmp = try bytes.extracting(unchecked: readOffset..<endOffset).withUnsafeBytes { buff in
-                        if buff.count < str.utf8CodeUnitCount { throw JSONError.unexpectedEndOfFile }
-                        return memcmp(buff.baseAddress!, str.utf8Start, str.utf8CodeUnitCount)
-                    }
-                    guard cmp == 0 else {
-                        throw errorForUnmatchedCharacter(in: str, typeDescriptor: typeDescriptor)
-                    }
-                    
-                    // If all looks good, advance past the string.
-                    self.moveReaderIndex(forwardBy: str.utf8CodeUnitCount)
-                } catch {
-                    // TODO: Remove unsavory workaroud
-                    throw error as! JSONError
-                }
-            }
-
-            @inlinable
-            @inline(__always)
             mutating func readBool() throws(JSONError) -> Bool {
-                switch self.read() {
-                case UInt8(ascii: "t"):
-                    try readExpectedString("rue", typeDescriptor: "boolean")
+                let byte = bytes._loadByteUnchecked(readOffset)
+                if byte == UInt8(ascii: "t") {
+                    try _jsonValidateTrue(in: bytes, at: readOffset)
+                    readOffset &+= 4
                     return true
-                case UInt8(ascii: "f"):
-                    try readExpectedString("alse", typeDescriptor: "boolean")
+                } else if byte == UInt8(ascii: "f") {
+                    try _jsonValidateFalse(in: bytes, at: readOffset)
+                    readOffset &+= 5
                     return false
-                default:
+                } else {
                     preconditionFailure("Expected to have `t` or `f` as first character")
                 }
             }
@@ -771,137 +732,22 @@ extension JSONParserDecoder {
             @inlinable
             @inline(__always)
             mutating func readNull() throws(JSONError) {
-                try readExpectedString("null", typeDescriptor: "null")
+                try _jsonValidateNull(in: bytes, at: readOffset)
+                readOffset &+= 4
             }
 
             // MARK: - Private Methods -
 
             // MARK: String
 
-            @inlinable
-            @_lifetime(self: copy self)
-            internal mutating func _parseHexIntegerDigits<Result: FixedWidthInteger>(totalDigits: Int, isNegative: Bool) throws(JSONError) -> Result {
-                let startOffset = self.readOffset
-
-                // ASCII constants, named for clarity:
-                let _0 = 48 as UInt8, _A = 65 as UInt8, _a = 97 as UInt8
-
-                let numericalUpperBound = _0 &+ 10
-                let uppercaseUpperBound = _A &+ 6
-                let lowercaseUpperBound = _a &+ 6
-                let multiplicand: Result = 16
-
-                var remainingDigits = totalDigits
-                var result = 0 as Result
-                while remainingDigits > 0, let digit = read() {
-                    remainingDigits -= 1
-
-                    let digitValue: Result
-                    if _fastPath(digit >= _0 && digit < numericalUpperBound) {
-                        digitValue = Result(truncatingIfNeeded: digit &- _0)
-                    } else if _fastPath(digit >= _A && digit < uppercaseUpperBound) {
-                        digitValue = Result(truncatingIfNeeded: digit &- _A &+ 10)
-                    } else if _fastPath(digit >= _a && digit < lowercaseUpperBound) {
-                        digitValue = Result(truncatingIfNeeded: digit &- _a &+ 10)
-                    } else {
-                        // TODO: Meh `!`
-                        let hexString = String._tryFromUTF8(self.bytes.extracting(unchecked: startOffset ..< self.readOffset))
-                        throw .invalidHexDigitSequence(hexString!, location: .countingLinesAndColumns(upTo: startOffset, in: self.bytes))
-                    }
-
-                    let overflow1: Bool
-                    (result, overflow1) = result.multipliedReportingOverflow(by: multiplicand)
-                    let overflow2: Bool
-                    (result, overflow2) = isNegative
-                    ? result.subtractingReportingOverflow(digitValue)
-                    : result.addingReportingOverflow(digitValue)
-                    guard _fastPath(!overflow1 && !overflow2) else {
-                        // TODO: Meh `!`
-                        let hexString = String._tryFromUTF8(self.bytes.extracting(unchecked: startOffset ..< self.readOffset))
-                        throw .invalidHexDigitSequence(hexString!, location: .countingLinesAndColumns(upTo: startOffset, in: self.bytes))
-                    }
-                }
-                if remainingDigits > 0 {
-                    throw .unexpectedEndOfFile
-                }
-                return result
-            }
-
-            @inlinable
-            @_lifetime(self: copy self)
-            internal mutating func _parseUnicodeHexSequence(allowNulls: Bool = true) throws(JSONError) -> UInt16 {
-                let startIndex = self.readOffset
-                let result: UInt16 = try _parseHexIntegerDigits(totalDigits: 4, isNegative: false)
-                guard allowNulls || result != 0 else {
-                    throw .invalidEscapedNullValue(location: .countingLinesAndColumns(upTo: startIndex, in: bytes))
-                }
-                return result
-            }
-
-            // Shared with JSON5, which requires allowNulls = false for compatibility.
-            @_lifetime(self: copy self)
-            internal mutating func _parseUnicodeSequence(into string: inout UniqueArray<UInt8>, allowNulls: Bool = true) throws(JSONError) {
-                // we build this for utf8 only for now.
-                let startIndex = readOffset
-                let bitPattern = try _parseUnicodeHexSequence(allowNulls: allowNulls)
-
-                // check if lead surrogate
-                if UTF16.isLeadSurrogate(bitPattern) {
-                    // if we have a lead surrogate we expect a trailing surrogate next
-                    let trailingSurrogateStartIndex = readOffset
-                    let leadingSurrogateBitPattern = bitPattern
-                    guard read() == ._backslash, read() == UInt8(ascii: "u") else {
-                        throw .expectedLowSurrogateUTF8SequenceAfterHighSurrogate(location: .countingLinesAndColumns(upTo: trailingSurrogateStartIndex, in: bytes))
-                    }
-
-                    let trailingSurrogateBitPattern = try _parseUnicodeHexSequence(allowNulls: true)
-                    guard UTF16.isTrailSurrogate(trailingSurrogateBitPattern) else {
-                        throw .expectedLowSurrogateUTF8SequenceAfterHighSurrogate(location: .countingLinesAndColumns(upTo: trailingSurrogateStartIndex, in: bytes))
-                    }
-
-                    let encodedScalar = UTF16.EncodedScalar([leadingSurrogateBitPattern, trailingSurrogateBitPattern])
-                    let unicode = UTF16.decode(encodedScalar)
-                    UTF8.encode(unicode) { codeUnit in
-                        string.append(codeUnit)
-                    }
-                } else {
-                    guard let unicode = Unicode.Scalar(bitPattern) else {
-                        throw .couldNotCreateUnicodeScalarFromUInt32(location: .countingLinesAndColumns(upTo: startIndex, in: bytes), unicodeScalarValue: UInt32(bitPattern))
-                    }
-                    UTF8.encode(unicode) { codeUnit in
-                        string.append(codeUnit)
-                    }
-                }
-            }
-
             @_lifetime(self: copy self)
             internal mutating func _parseEscapeSequence(into string: inout UniqueArray<UInt8>) throws(JSONError) {
-                while let next = read() {
-                    switch next {
-                    case UInt8(ascii:"\""):
-                        return string.append(.init(ascii: "\""))
-                    case UInt8(ascii:"\\"):
-                        return string.append(.init(ascii: "\\"))
-                    case UInt8(ascii:"/"):
-                        return string.append(.init(ascii: "/"))
-                    case UInt8(ascii:"b"):
-                        return string.append(0x08) // \b
-                    case UInt8(ascii:"f"):
-                        return string.append(0x0C) // \f
-                    case UInt8(ascii:"n"):
-                        return string.append(0x0A) // \n
-                    case UInt8(ascii:"r"):
-                        return string.append(0x0D) // \r
-                    case UInt8(ascii:"t"):
-                        return string.append(0x09) // \t
-                    case UInt8(ascii:"u"):
-                        return try _parseUnicodeSequence(into: &string)
-                    default:
-                        // TODO: This doesn't work any more, since the offsets don't translate.
-                        throw .unexpectedEscapedCharacter(ascii: next, location: .countingLinesAndColumns(upTo: readOffset, in: bytes))
-                    }
+                guard let escaped = read() else {
+                    throw .unexpectedEndOfFile
                 }
-                throw .unexpectedEndOfFile
+                try _jsonDispatchEscapeSequence(
+                    escaped: escaped, in: bytes, at: &readOffset, into: &string
+                )
             }
 
             @_lifetime(self: copy self)
