@@ -323,6 +323,32 @@ extension NewJSONDecoder.Options.DateDecodingStrategy {
     }
 }
 
+// MARK: - Lazy Primitive Construction
+
+extension NewJSONDecoder {
+    /// Creates a pre-scanned lazy primitive from the given bytes.
+    /// This performs a full structural scan upfront, then allows lazy
+    /// access to values via offsets into both the map and source bytes.
+    @_lifetime(copy bytes)
+    @usableFromInline
+    internal static func prescannedPrimitive(
+        from bytes: RawSpan
+    ) throws(JSONError) -> JSONPrescannedPrimitive {
+        try JSONPrescannedPrimitive.scan(bytes)
+    }
+
+    /// Creates a streaming lazy primitive from the given bytes.
+    /// No upfront scanning is performed; structure is discovered
+    /// on-the-fly as you iterate.
+    @_lifetime(copy bytes)
+    @usableFromInline
+    internal static func streamingPrimitive(
+        from bytes: RawSpan
+    ) throws(JSONError) -> JSONStreamingPrimitive {
+        try JSONStreamingPrimitive.from(bytes)
+    }
+}
+
 extension NewJSONEncoder.Options.DateEncodingStrategy {
     func jsonValue(for date: Date, context: AdaptorEncodableValueContext<JSONPrimitive>) throws(CodingError.Encoding) -> JSONPrimitive {
         do {
