@@ -31,6 +31,9 @@ enum JSONError: Swift.Error, Equatable {
     case numberWithLeadingZero(location: SourceLocation)
     case numberIsNotRepresentableInSwift(parsed: String)
     case singleFragmentFoundButNotAllowed
+    case numberOverflow(at: SourceLocation)
+    case keyNotFound(String)
+    case indexOutOfBounds(Int)
 
     // JSON5
 
@@ -77,6 +80,12 @@ enum JSONError: Swift.Error, Equatable {
             return "Number \(parsed) is not representable in Swift."
         case .singleFragmentFoundButNotAllowed:
             return "JSON input did not start with array or object as required by options."
+        case let .numberOverflow(location):
+            return "Number value overflows the requested type around \(location)."
+        case let .keyNotFound(key):
+            return "Key '\(key)' not found in JSON object."
+        case let .indexOutOfBounds(index):
+            return "Index \(index) is out of bounds in JSON array."
 
         // JSON5
 
@@ -98,6 +107,10 @@ enum JSONError: Swift.Error, Equatable {
             return location
         case let .couldNotCreateUnicodeScalarFromUInt32(location, _), let .numberWithLeadingZero(location):
             return location
+        case let .numberOverflow(location):
+            return location
+        case .keyNotFound, .indexOutOfBounds:
+            return nil
         default:
             return nil
         }
@@ -167,6 +180,12 @@ extension JSONError {
             return ("Invalid number: \(parsed)", nil)
         case .singleFragmentFoundButNotAllowed:
             return ("Invalid JSON structure (single fragment not allowed)", nil)
+        case let .numberOverflow(location):
+            return ("Number overflows requested type", location)
+        case let .keyNotFound(key):
+            return ("Key '\(key)' not found", nil)
+        case let .indexOutOfBounds(index):
+            return ("Index \(index) out of bounds", nil)
         case .unterminatedBlockComment:
             return ("Unterminated comment", nil)
         }
