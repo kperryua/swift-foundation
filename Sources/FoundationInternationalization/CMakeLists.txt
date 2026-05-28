@@ -18,7 +18,10 @@ add_library(FoundationInternationalization
     Duration+Utils.swift
     RangeExpression.swift
     TimeInterval+Utils.swift
-    URLParser+ICU.swift)
+    URL+UnicodeLookalikeTable.swift
+    Formatting/URLFormatStyle.swift
+    URLParser+ICU.swift
+    Formatting/URLParseStrategy.swift)
 
 add_subdirectory(Calendar)
 add_subdirectory(Formatting)
@@ -30,6 +33,7 @@ add_subdirectory(TimeZone)
 
 target_compile_options(FoundationInternationalization PRIVATE
     "SHELL:$<$<COMPILE_LANGUAGE:Swift>:-Xfrontend -enable-experimental-feature -Xfrontend AccessLevelOnImport>"
+    "SHELL:$<$<COMPILE_LANGUAGE:Swift>:-Xfrontend -enable-experimental-feature -Xfrontend Lifetimes>"
     "SHELL:$<$<COMPILE_LANGUAGE:Swift>:-Xfrontend -enable-experimental-feature -Xfrontend ImportMacroAliases>"
     "SHELL:$<$<COMPILE_LANGUAGE:Swift>:-Xfrontend -enable-experimental-feature -Xfrontend StrictConcurrency>"
     "SHELL:$<$<COMPILE_LANGUAGE:Swift>:-Xfrontend -enable-upcoming-feature -Xfrontend InferSendableFromCaptures>"

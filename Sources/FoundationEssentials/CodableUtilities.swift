@@ -214,6 +214,8 @@ extension UInt8 {
     }
 }
 
+#if !NO_JSON_FOUNDATION_SPECIALIZATION
+
 //===----------------------------------------------------------------------===//
 // Date parsing conveniences
 //===----------------------------------------------------------------------===//
@@ -338,6 +340,8 @@ internal extension Date {
         return (y, m, d)
     }
 }
+
+#endif
 
 //===----------------------------------------------------------------------===//
 // Integer parsing conveniences
@@ -599,7 +603,7 @@ struct BufferReader {
                 if nextIndex < readIndex && fullBuffer[unchecked: nextIndex] == ._newline {
                     p = nextIndex
                 }
-            } else if fullBuffer[offset: 1] == ._newline {
+            } else if fullBuffer[unchecked: p] == ._newline {
                 count += 1
             }
             fullBuffer.formIndex(&p, offsetBy: 1)

@@ -20,6 +20,7 @@ import ucrt
 
 #if !FOUNDATION_FRAMEWORK
 
+/// A structure representing a base-10 number.
 @available(macOS 10.10, iOS 8.0, watchOS 2.0, tvOS 9.0, *)
 public struct Decimal: Sendable {
     @_spi(SwiftCorelibsFoundation)
@@ -150,6 +151,7 @@ public struct Decimal: Sendable {
         self = d
     }
 
+    /// Creates a decimal initialized to `0`.
     public init() {
         self.storage = .init(
             exponent: 0,
@@ -161,6 +163,7 @@ public struct Decimal: Sendable {
 }
 
 extension Decimal {
+    /// An enumeration that specifies possible rounding modes.
     @available(macOS 10.10, iOS 8.0, watchOS 2.0, tvOS 9.0, *)
     public enum RoundingMode: UInt, Sendable {
         case plain
@@ -169,6 +172,7 @@ extension Decimal {
         case bankers
     }
 
+    /// An enumeration that specifies possible calculation errors.
     @available(macOS 10.10, iOS 8.0, watchOS 2.0, tvOS 9.0, *)
     public enum CalculationError: UInt, Sendable {
         case noError
@@ -293,15 +297,18 @@ extension Decimal {
         }
 
         func stringViewContainsDecimalSeparator(at index: UTF8Collection.Index) -> Bool {
-            for indexOffset in 0 ..< decimalSeparator.count {
-                let stringIndex = utf8View.index(index, offsetBy: indexOffset)
-                let decimalIndex = decimalSeparator.index(
-                    decimalSeparator.startIndex,
-                    offsetBy: indexOffset
-                )
+            var stringIndex = index
+            var decimalIndex = decimalSeparator.startIndex
+            while decimalIndex != decimalSeparator.endIndex {
+                guard stringIndex != utf8View.endIndex else {
+                    // Input ran out before we matched the entire separator.
+                    return false
+                }
                 if utf8View[stringIndex] != decimalSeparator[decimalIndex] {
                     return false
                 }
+                utf8View.formIndex(after: &stringIndex)
+                decimalSeparator.formIndex(after: &decimalIndex)
             }
             return true
         }
