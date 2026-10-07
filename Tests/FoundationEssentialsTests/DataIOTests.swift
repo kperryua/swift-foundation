@@ -238,6 +238,44 @@ private final class DataIOTests {
         #expect(mode == 0o400)
 #endif
     }
+
+    // While replacing an existing file, the in-progress temporary file must remain readable and writable by its owner so that a leftover temporary file (e.g. from a terminated process) can still be cloned or removed.
+    @Test
+    func atomicWriteTemporaryFilePermissions() async throws {
+        let directory = URL.temporaryDirectory.appendingPathComponent("testdir-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let destination = directory.appendingPathComponent("destination")
+        let data = generateTestData()
+        try data.write(to: destination)
+
+        // Inspect any temporary files that appear next to the destination while the writes are in flight. If none are observed, there is nothing to check.
+        let poller = Task.detached {
+            while !Task.isCancelled {
+                let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+                for name in names where name != "destination" {
+                    let path = directory.appendingPathComponent(name).path
+                    guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+                          let mode = attributes[.posixPermissions] as? UInt else {
+                        // The temporary file was renamed or removed after we listed it
+                        continue
+                    }
+                    #expect(mode & 0o600 == 0o600, "Temporary file \(name) has mode \(String(mode, radix: 8))")
+                }
+                await Task.yield()
+            }
+        }
+
+        for _ in 0 ..< 16 {
+            try data.write(to: destination, options: [.atomic])
+        }
+        poller.cancel()
+        await poller.value
+
+        let readData = try Data(contentsOf: destination)
+        #expect(readData == data)
+    }
 }
 
 extension LargeDataTests {
